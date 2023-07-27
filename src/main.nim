@@ -209,3 +209,7 @@ proc main {.async.} =
 
 addExitProc(resetAttributes)
 waitFor main()
+
+when hostOS == "windows":
+  echo "Press Enter to exit..."
+  discard stdin.readLine()
