@@ -157,6 +157,8 @@ proc main {.async.} =
   var keys: seq[string]
   # Read keys from the file
   if not readConsole:
+    if not fileExists("keys.txt"):
+      quit("keys.txt not found, create it and put the keys to check there.")
     keys = readFile("keys.txt").splitLines()
   # Or from the terminal
   else:
