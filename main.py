@@ -144,12 +144,19 @@ def main():
   scanner = KeyScanner(keys, args.verbose, args.requests)
   good_keys = asyncio.run(scanner.scan())
 
+  # Initialize counters
+  total_good_keys = 0
+  model_key_counts = {model: 0 for model in RATE_LIMIT_PER_MODEL.keys()}
+
   for key in good_keys:
     if not key or key.over_quota: continue
+    total_good_keys += 1
+    top_model = key.top_model()
+    model_key_counts[top_model] += 1
     print("---")
     print(f"{key.key_string}")
     for model in key.models:
-      if model == key.top_model():
+      if model == top_model:
         print(f"  - {model} (RPM: {key.ratelimit})")
       else:
         print(f"  - {model}")
@@ -158,6 +165,12 @@ def main():
     if not key.org.startswith("user-"):
       print(f"Organization (unique): {key.org}")
     print("")
+
+  # Print total good keys and per model counts
+  print(f"Total good keys: {total_good_keys}")
+  for model, count in model_key_counts.items():
+    if count > 0:
+      print(f"Number of good keys for {model}: {count}")
 
   for file in scanner.file_handles.values():
     file.close()
