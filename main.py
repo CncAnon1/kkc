@@ -145,12 +145,10 @@ def main():
   good_keys = asyncio.run(scanner.scan())
 
   # Initialize counters
-  total_good_keys = 0
   model_key_counts = {model: 0 for model in RATE_LIMIT_PER_MODEL.keys()}
 
   for key in good_keys:
     if not key or key.over_quota: continue
-    total_good_keys += 1
     top_model = key.top_model()
     model_key_counts[top_model] += 1
     print("---")
@@ -166,8 +164,11 @@ def main():
       print(f"Organization (unique): {key.org}")
     print("")
 
+  # Calculate total good keys
+  total_good_keys = sum(model_key_counts.values())
+
   # Print total good keys and per model counts
-  print(f"Total good keys: {total_good_keys}")
+  print(f"\nTotal good keys: {total_good_keys}")
   for model, count in model_key_counts.items():
     if count > 0:
       print(f"Number of good keys for {model}: {count}")
