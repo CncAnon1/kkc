@@ -9,6 +9,13 @@ BASE_API = "https://api.openai.com/v1"
 RATE_LIMIT_PER_MODEL = {"gpt-3.5-turbo": 3500, "gpt-4": 200, "gpt-4-32k": 10}
 oai_key_regex = re.compile(r"(sk-[a-zA-Z0-9]{20}T3BlbkFJ[a-zA-Z0-9]{20})")
 
+# utils
+def get_headers(key: str, org_id: str = None):
+  headers = {"Authorization": f"Bearer {key}"}
+  if org_id:
+    headers["OpenAI-Organization"] = org_id
+  return headers
+
 class Key:
   def __init__(self, key_string: str, models: List[str] = []):
     self.key_string = key_string
@@ -16,7 +23,9 @@ class Key:
     self.working = False
     self.trial_status = False
     self.over_quota = False
-    self.org = ""
+    self.org_name = ""
+    self.org_id = ""
+    self.org_default = False
     self.models = models
     self.ratelimit = 0
 
@@ -41,27 +50,44 @@ class KeyScanner:
     return await asyncio.gather(*tasks)
 
   async def check_key(self, key: str):
+    result = []
     async with self.sem:
       if self.verbose:
         print("Checking key", key)
       
-      models = await self.get_models(key)
-      if not models:
+      orgs = await self.get_orgs(key)
+      if not orgs:
         return
-
-      status = Key(key, models=models)
-      top_model_name = status.top_model()
-      await self.try_completion(status, top_model_name)
       
-      if status.working or status.over_quota:
-        if status.over_quota:
-          status.org = await self.get_org_name(key)
-        self.write_key_to_file(status, top_model_name)
-      return status
+      for org in orgs:
+        is_default_org = org["is_default"]
+        if not is_default_org and self.verbose:
+          print(f"Checking alternative org {org['name']} for {key}")
+        
+        models = await self.get_models(key, org["id"])
+        # Not sure if this can happen, but just to be safe 
+        if not models:
+          continue
+        
+        status = Key(key, models=models)
+        status.org_default = is_default_org
+        status.org_name = org["name"]
+        status.org_id = org["id"]
 
-  async def get_models(self, key: str) -> List[str]:
+        top_model_name = status.top_model()
+        await self.try_completion(status, top_model_name)
+      
+        if status.working or status.over_quota:
+          self.write_key_to_file(status, top_model_name)
+          result.append(status)
+          if self.verbose:
+            print(f"Good key {key} with model {top_model_name}")
+      
+      return result  
+
+  async def get_models(self, key: str, org_id: str) -> List[str]:
     async with aiohttp.ClientSession() as session:
-      async with session.get(f"{BASE_API}/models", headers={"Authorization": f"Bearer {key}"}) as resp:
+      async with session.get(f"{BASE_API}/models", headers=get_headers(key, org_id)) as resp:
         if resp.status != 200:
           return []
         data = await resp.json()
@@ -72,7 +98,7 @@ class KeyScanner:
   async def try_completion(self, status: Key, model: str):
     async with aiohttp.ClientSession() as session:
       req_data = {"model": model, "messages": [{"role": "user", "content": ""}], "max_tokens": -1}
-      async with session.post(f"{BASE_API}/chat/completions", headers={"Authorization": f"Bearer {status.key_string}", "Content-Type": "application/json"}, json=req_data) as resp:
+      async with session.post(f"{BASE_API}/chat/completions", headers=get_headers(status.key_string, status.org_id), json=req_data) as resp:
         data = await resp.json()
         if resp.status == 401:
           # Just an invalid key
@@ -88,7 +114,7 @@ class KeyScanner:
           return
 
         # Get the ratelimit for the top model
-        ratelimit = int(resp.headers.get("x-ratelimit-limit-requests", "0"))
+        ratelimit = int(resp.headers.get("x-ratelimit-limit-requests", "-1"))
         status.ratelimit = ratelimit
         # This really only gets triggered for turbo
         if ratelimit < RATE_LIMIT_PER_MODEL[model]:
@@ -98,22 +124,42 @@ class KeyScanner:
         # ratelimited when we're doing our request
         ratelimited = resp.status == 429
         if (resp.status == 400 and error_type == "invalid_request_error") or ratelimited:
-          status.org = resp.headers.get("openai-organization", "user-xyz")
           status.working = True
         return
 
-  async def get_org_name(self, key: str) -> str:
-    url = f"{BASE_API}/images/generations"
+  async def get_orgs(self, key: str):
+    """
+    Undocumented OpenAI API, "data" key is an array of org entries:
+    {
+      "object": "organization",
+      "id": "org-<ORGID>",
+      "created": 1685299576,
+      "title": "<ORGTITLE>",
+      "name": "<ORGNAME>",
+      "description": null,
+      "personal": false,
+      "is_default": true,
+      "role": "owner"
+    }
+    """
+    url = "https://api.openai.com/v1/organizations"
     async with aiohttp.ClientSession() as session:
-      async with session.post(url, headers={"Authorization": f"Bearer {key}"}) as resp:
-        return resp.headers.get("openai-organization", "user-xyz")
+      async with session.get(url, headers=get_headers(key)) as resp:
+        if resp.status != 200:
+          return []
+        data = await resp.json()
+        return data["data"]
 
   def write_key_to_file(self, status: Key, top_model_name: str):
     outfile = self.file_handles["over_quota" if status.over_quota else top_model_name]
     output = status.key_string
     addons = []
-    if not status.org.startswith("user-"):
-      addons.append(f"org: {status.org}")
+    if not status.org_name.startswith("user-"):
+      if status.org_default:
+        addons.append(f"org '{status.org_name}'")
+      else:
+        addons.append(f"alternate org '{status.org_name}' with id '{status.org_id}'")
+
     if status.trial_status:
       addons.append("trial")
     if status.over_quota and "gpt-4" in top_model_name:
@@ -124,9 +170,9 @@ class KeyScanner:
     outfile.flush()
 
 def main():
-  parser = argparse.ArgumentParser(description="Kute Key Checker")
-  parser.add_argument("file", help="file containing the keys")
-  parser.add_argument("-v", "--verbose", action="store_true", help="show the keys being currently checked")
+  parser = argparse.ArgumentParser(description="KKC - OpenAI key checker")
+  parser.add_argument("file", help="Input file containing the keys")
+  parser.add_argument("-v", "--verbose", action="store_true", help="Verbose scanning")
   parser.add_argument("-r", "--requests", type=int, default=20, help="Max number of requests to make at once")
 
   args = parser.parse_args()
@@ -138,11 +184,10 @@ def main():
 
   if not os.path.exists("scan_results"):
     os.makedirs("scan_results")
-  if not os.path.exists("scan_results_quota"):
-    os.makedirs("scan_results_quota")
 
   scanner = KeyScanner(keys, args.verbose, args.requests)
-  good_keys = asyncio.run(scanner.scan())
+  # Each scan returns a list of 1 or more statuses (alternate orgs)
+  good_keys = [key for key_result in asyncio.run(scanner.scan()) for key in key_result]
 
   # Initialize counters
   model_key_counts = {model: 0 for model in RATE_LIMIT_PER_MODEL.keys()}
@@ -155,14 +200,19 @@ def main():
     print(f"{key.key_string}")
     for model in key.models:
       if model == top_model:
-        print(f"  - {model} (RPM: {key.ratelimit})")
+        ratelimit_text = str(key.ratelimit) if key.ratelimit >= 0 else "unknown"
+        print(f"  - {model} (RPM: {ratelimit_text})")
       else:
         print(f"  - {model}")
     if key.trial_status:
       print("  - !trial key!")
-    if not key.org.startswith("user-"):
-      print(f"Organization (unique): {key.org}")
-    print("")
+    if not key.org_name.startswith("user-"):
+      if key.org_default:
+        print(f"Main org: {key.org_name}")
+      else:
+        print(f"Alternate org: {key.org_name} (id {key.org_id})")
+
+    print("---\n")
 
   # Calculate total good keys
   total_good_keys = sum(model_key_counts.values())
