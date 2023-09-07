@@ -187,7 +187,9 @@ def main():
 
   scanner = KeyScanner(keys, args.verbose, args.requests)
   # Each scan returns a list of 1 or more statuses (alternate orgs)
-  good_keys = [key for key_result in asyncio.run(scanner.scan()) for key in key_result]
+  good_keys = []
+  for key_result in asyncio.run(scanner.scan()):
+    good_keys.extend(key_result)
 
   # Initialize counters
   model_key_counts = {model: 0 for model in RATE_LIMIT_PER_MODEL.keys()}
