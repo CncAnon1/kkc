@@ -57,7 +57,7 @@ class KeyScanner:
       
       orgs = await self.get_orgs(key)
       if not orgs:
-        return
+        return result
       
       for org in orgs:
         is_default_org = org["is_default"]
