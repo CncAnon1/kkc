@@ -105,10 +105,12 @@ class KeyScanner:
           return
         
         error_type = data.get("error", {}).get("type", "")
-        if error_type in ["billing_not_active", "access_terminated"]:
-          # Disabled or banned
+        if error_type in ["access_terminated"]:
+          # Banned
           return
-        elif error_type == "insufficient_quota":
+        # A billing terminated account CAN get restored!
+        # https://gitgud.io/khanon/oai-reverse-proxy/-/merge_requests/45/diffs?commit_id=a06de8055ad6a3044981a9f1c8a5ca63a44ea1d9
+        elif error_type in ["insufficient_quota", "billing_not_active"]:
           # Over quota
           status.over_quota = True
           return
